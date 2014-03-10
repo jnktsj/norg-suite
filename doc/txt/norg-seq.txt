@@ -1,0 +1,159 @@
+norg-seq
+========
+
+This script finds organelle insertions in the nuclear
+genomes with local alignments between the organelle and
+the nuclear genomes.
+
+
+Requirement
+-----------
+
+1) Python 2.5, or more latest
+
+2) Third party tools (see also: "README")
+   - tantan (repeat masking): http://www.cbrc.jp/tantan/
+   - LAST (local alignments): http://last.cbrc.jp/
+
+
+Usage
+-----
+
+norg-seq runs with:
+
+   1) Two required options (pathes to thrid party tools).
+
+   2) Organelle genome file (single fasta).
+
+   3) Nuclear genome file which contains all chromosomes
+      (multi fasta).
+
+You can use it like this:
+
+   norg-seq --tantan PATH --last PATH \
+            [options] organelleGenome nuclearGenome
+
+The program finally outputs two kinds of files:
+
+   1) PREFIX.*      Bed format file(s) of organelle insertion
+                    coordinates in the nuclear genome. It can be
+                    displayed on the UCSC Genome Browser when you
+                    upload it as Custom Tracks.
+                    Each column represents:
+
+                      [1]  chromosome
+                      [2]  chrom. start
+                      [3]  chrom. end
+                      [4]  organelle : org. start : org. end
+                      [5]  color-code (on: 1, off: 0)
+                      [6]  chrom. strand
+                      [7]  chrom. block starts
+                      [8]  chrom. block ends
+                      [9]  RGB color string
+                      [10] block count
+                      [11] block sizes
+                      [12] block starts
+
+   2) PREFIX-*.mfa  Multi fasta file(s) of organelle insertion
+                    sequences. It can be used as input(s) of the
+                    norg-age program for estimating insertion ages.
+
+   "*" is replaced with "uniq" for genuine organelle insertions,
+   or "dups" for organelle insertions considered as nuclear
+   duplications.
+
+
+Options
+~~~~~~~
+
+Cosmetic Options
+~~~~~~~~~~~~~~~~
+
+   -h, --help        Show all options and their default settings.
+
+   -v, --verbose     Be verbose: print what norg-seq is doing.
+
+   -o, --output PREFIX
+                     Prefix of output file (default: 'out').
+
+
+Alignment Options
+~~~~~~~~~~~~~~~~~
+
+   --dnaform DNAFORM
+                     Organelle DNA form: 'circular' or 'linear' (default:
+                     'circular').
+
+   --rmsk-organelle  Soft-mask low complexity regions in organelle genome
+                     (default: ON).
+
+   --rmsk-nucleus    Soft-mask low complexity regions in nuclear genome
+                     (default: ON).
+
+   --greedy          Toggle switch: Simulate optimal E-value threshold
+                     (default: ON). During this simulation, norg-seq 
+                     generates the reversed (but not complementing)
+                     organelle genome and aligns it against the nuclear
+                     genome. Since DNA sequences do not evolve by simple
+                     revarsal, any match between this query and the nuclear
+                     genome can be considered to be spurious. The E-value
+                     whose spurious matches are zero is assumed as optimal.
+
+   --evalue NUMBER
+                     E-value threshold for alignments. When this option is
+                     activated, norg-seq automatically turns off '--greedy'
+                     mode.
+
+
+Duplication Filtering Options
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+   --dup-filter      Toggle switch: Filter nuclear segmental duplications
+                     (default: ON). When several hits fall into the regions
+                     specified with '--segdup-db' or have similar flanking
+                     sequences ('--flank-len') to others, norg-seq considers
+                     those hits derived from segmental duplication regions
+                     (i.e. not genuine organelle DNA insertions).
+
+   --segdup-db FILE
+                     Segmental duplication database in bed format. Fields
+                     of the database should be formatted like this:
+
+                       [1] chromosome  [2] start  [3] end
+
+                     The start coordinates must be zero-based, and each
+                     field must be separated by tabs.
+
+   --flank-len NUMBER
+                     Length of flanking sequences of hits to be compared
+                     (default: 200bp).
+
+   --dup-coverage NUMBER
+                     Overlapping fraction of sequences which are similar
+                     to each other (default: 90%).
+
+Chaining Options
+~~~~~~~~~~~~~~~~
+
+  --chain            Toggle switch: Chain hits separated by indels and
+                     mutations (default: ON). When hits co-linearly exists
+                     in specific ranges specified with '--deletion',
+                     '--insertion', '--concat', and '--overlap', norg-seq
+                     consolidates the hits as one insertion.
+
+  --deletion NUMBER
+                     Maximum deletion length of nuclear genome coordinates
+                     (default: 500bp).
+
+  --insertion NUMBER
+                     Maximum insertion length of nuclear genome coordinates
+                     (default: 10000bp).
+
+  --concat NUMBER
+                     Maximum distance between two hits in organelle or nuclear
+                     genome coordinates to allow chaining (default: 300bp).
+
+  --overlap NUMBER
+                     Maximum overlapping length of organelle genome coordinates
+                     to allow merging (default: 100bp).
+

@@ -1,0 +1,250 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# Copyright 2012, 2013, 2014 Junko Tsuji
+
+# Finds organelle DNA insertions in the nuclear genome carefully,
+# and extracts the insertion sequences from the nuclear genome.
+
+
+# built-in modules
+import sys, os.path, commands
+from time import gmtime, strftime
+from optparse import OptionParser, OptionGroup
+
+# modules in 'libs'
+from libs.align import align
+from libs.rmdup import rmdup
+from libs.chain import chain
+from libs.io import pathExists, readFasta
+from libs.io import writeFasta, writeCoord, extractSeq
+
+
+# option parser
+def buildOptionParser():
+    usage = "%prog [options] organelleGenome nuclearGenome"
+    description = "Find organelle DNA insertions in the nuclear genome, and extract the insertion sequences"
+    op = OptionParser(usage=usage, description=description)
+
+    op.add_option("-v", "--verbose",
+        help="Be verbose: print what norg-seq is doing",
+        action="store_true",
+        default=False,
+        dest="verbose")
+    op.add_option("-o", "--output",
+        help="Prefix of output file(s) (default: %default)",
+        action="store",
+        metavar="PREFIX",
+        default="out",
+        dest="output")
+
+    req_grp = OptionGroup(op, "Software Paths [*Required]")
+    aln_grp = OptionGroup(op, "Alignment Options")
+    dup_grp = OptionGroup(op, "Duplication Filtering Options")
+    con_grp = OptionGroup(op, "Chaining Options")
+
+    op.add_option_group(req_grp)
+    op.add_option_group(aln_grp)
+    op.add_option_group(dup_grp)
+    op.add_option_group(con_grp)
+
+    # ========     software  options      ======== #
+    req_grp.add_option("", "--tantan",
+        help="Path to 'tantan' executable (default: $PATH)",
+        action="store",
+        metavar="PATH",
+        default="",
+        dest="tantan")
+    req_grp.add_option("", "--last",
+        help="Path to 'lastdb', 'lastal', and 'lastex' executables (default: $PATH)",
+        action="store",
+        metavar="PATH",
+        default="",
+        dest="last")
+    # ========     alignment  options     ======== #
+    aln_grp.add_option("", "--dnaform",
+        help="Organelle DNA form: 'circular' or 'linear' (default: %default)",
+        action="store",
+        metavar="DNAFORM",
+        default="circular",
+        dest="dnaform")
+    aln_grp.add_option("", "--rmsk-organelle",
+        help="Soft-mask low complexity regions in organelle genome (default: %default)",
+        action="store_false",
+        default=True,
+        dest="rmsk_organelle")
+    aln_grp.add_option("", "--rmsk-nucleus",
+        help="Soft-mask low complexity regions in nuclear genome (default: %default)",
+        action="store_false",
+        default=True,
+        dest="rmsk_nucleus")
+    aln_grp.add_option("", "--greedy",
+        help="Toggle switch: Simulate optimal E-value threshold (default: %default)",
+        action="store_false",
+        default=True,
+        dest="greedy")
+    aln_grp.add_option("", "--evalue",
+        help="E-value threshold for alignments; '--greedy' will be automatically turned off",
+        action="store",
+        metavar="NUMBER",
+        type="float",
+        default=-1,
+        dest="evalue")
+    # ======== duplication filter options ======== #
+    dup_grp.add_option("", "--dup-filter",
+        help="Toggle switch: Filter nuclear segmental duplications (default: %default)",
+        action="store_false",
+        default=True,
+        dest="dup_filter")
+    dup_grp.add_option("", "--segdup-db",
+        help="Segmental duplication database in bed format",
+        action="store",
+        metavar="FILE",
+        dest="segdup_db")
+    dup_grp.add_option("", "--flank-len",
+        help="Length of flanking sequences of hits to be compared (default: %default)",
+        action="store",
+        metavar="NUMBER",
+        type="int",
+        default=200,
+        dest="flank_len")
+    dup_grp.add_option("", "--dup-coverage",
+        help="Overlapping fraction of sequences which are similar to each other (default: %default)",
+        action="store",
+        metavar="NUMBER",
+        type="float",
+        default=0.9,
+        dest="dup_coverage")
+    # ========     chaining  options      ======== #
+    con_grp.add_option("", "--chain",
+        help="Toggle switch: Chain hits separated by indels and mutations (default: %default)",
+        action="store_false",
+        default=True,
+        dest="chain")
+    con_grp.add_option("", "--deletion",
+        help="Maximum deletion length of nuclear genome coordinates (default: %default)",
+        action="store",
+        metavar="NUMBER",
+        type="int",
+        default=500,
+        dest="deletion")
+    con_grp.add_option("", "--insertion",
+        help="Maximum insertion length of nuclear genome coordinates (default: %default)",
+        action="store",
+        metavar="NUMBER",
+        type="int",
+        default=10000,
+        dest="insertion")
+    con_grp.add_option("", "--concat",
+        help="Maximum distance between two hits in organelle or nuclear genome coordinates to allow chaining (default: %default)",
+        action="store",
+        metavar="NUMBER",
+        type="int",
+        default=300,
+        dest="concat")
+    con_grp.add_option("", "--overlap",
+        help="Maximum overlapping length of organelle genome coordinates to allow merging (default: %default)",
+        action="store",
+        metavar="NUMBER",
+        type="int",
+        default=100,
+        dest="overlap")
+    return op
+
+
+# check input arguments
+def checkArguments(opts, args):
+    if len(args) != 2:
+        raise Exception("I need 2 arguments: organelleGenome nuclearGenome")
+    if opts.tantan: opts.tantan += "/"
+    if opts.last  : opts.last   += "/"
+    pathExists(opts.tantan + "tantan")
+    pathExists(opts.last   + "lastdb")
+    pathExists(opts.last   + "lastal")
+    pathExists(opts.last   + "lastex")
+    pathExists(args[0])
+    pathExists(args[1])
+    if opts.segdup_db:
+        pathExists(opts.segdup_db)
+    if opts.dnaform != 'circular' and opts.dnaform != 'linear':
+        raise Exception("can't interpret: --dnaform " + opts.dnaform)
+
+
+# convert int nuclear genomic coordinets to string ones
+def stringify(hitDict):
+    for chrom in hitDict:
+        L = len(hitDict[chrom])
+        for i in range(L):
+            hitDict[chrom][i] = map(str, hitDict[chrom][i])
+
+
+# main function
+def main(prog, opts, args, wd):
+    checkArguments(opts, args)
+
+    hitDict = {}
+    dupDict = {}
+    hitCoutns = 0
+    dupCounts = 0
+
+    # align organelle and nuclear genomes
+    hitDict, hitCounts, organelle, nucleus = align(prog, opts, args, wd)
+
+    # filter nuclear duplicates
+    if opts.dup_filter and hitCounts > 1:
+        hitCounts, dupDict, dupCounts \
+            = rmdup(prog, opts, wd, hitDict, organelle, nucleus)
+
+    if hitCounts: stringify(hitDict)
+    if dupCounts: stringify(dupDict)
+
+    # chain unique and duplicated hits
+    if opts.chain:
+        if hitCounts > 1:
+            if opts.verbose:
+                print prog + ": chain contiguous unique hits"
+            hitCounts = chain(opts, hitDict)
+        if dupCounts > 1:
+            if opts.verbose:
+                print prog + ": chain contiguous duplicated hits"
+            dupCounts = chain(opts, dupDict)
+
+    # outout coordinate files
+    if hitCounts: writeCoord(hitDict, opts.output + ".uniq")
+    if dupCounts: writeCoord(dupDict, opts.output + ".dups")
+
+    # output sequence files
+    if opts.verbose:
+        print prog + ": extract detected insertion sequences"
+    fh = open(opts.output + "-uniq.mfa", "w")
+    if dupCounts: fd = open(opts.output + "-dups.mfa", "w")
+    for name, seq in readFasta(nucleus):
+        hitPos = hitDict.get(name, [])
+        if hitPos:
+            for n, s in extractSeq(name, hitPos, seq):
+                writeFasta(">" + n, s, fh)
+        if dupCounts:
+            dupPos = dupDict.get(name, [])
+            if dupPos:
+                for n, s in extractSeq(name, dupPos, seq):
+                    writeFasta(">" + n, s, fd)
+    fh.close()
+    if dupCounts: fd.close()
+    print prog + ": completed!"
+
+
+if __name__ == "__main__":
+    prog = os.path.basename(sys.argv[0])
+    op = buildOptionParser()
+    (opts, args) = op.parse_args()
+
+    # work directory
+    wd = "seqOut_" + strftime("%Y%m%d%H%M%S", gmtime())
+    commands.getoutput("mkdir " + wd)
+
+    try: main(prog, opts, args, wd)
+    except KeyboardInterrupt: pass
+    except Exception, e:
+        sys.exit(prog + ": error: " + str(e))
+    finally:
+        commands.getoutput("rm -r " + wd)  # clean up

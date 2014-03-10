@@ -1,0 +1,191 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# Copyright 2012, 2013, 2014 Junko Tsuji
+
+# Estimates evolutionary ages of organelle DNA insertions
+# in the nuclear genome.
+
+
+# built-in modules
+import sys, os.path
+import commands, string
+from time import gmtime, strftime
+from optparse import OptionParser, OptionGroup
+
+# modules in 'libs'
+from libs.io import pathExists
+from libs.io import readFasta, readTree
+from libs.io import writeFasta, writeCoord
+from libs.tree import orgTree, nucTree
+from libs.ages import nucAges
+
+# option parser
+def buildOptionParser():
+    usage = "%prog [options] organelleGenome fastaFile(s)"
+    description = "Extimates organelle DNA insertion ages"
+    op = OptionParser(usage=usage, description=description)
+    op.add_option("-v", "--verbose",
+        help="be verbose: print what norg-age is doing",
+        action="store_true",
+        default=False,
+        dest="verbose")
+
+    req_grp = OptionGroup(op, "Outgroup and Software Paths [*Required]")
+    phy_grp = OptionGroup(op, "Reference Organelle Options")
+    op.add_option_group(req_grp)
+    op.add_option_group(phy_grp)
+
+    # ======== outgroup and software options ======== #
+    req_grp.add_option("", "--outgroup",
+        help="Outgroup species name (i.e. name in fasta) in organelle phylogeny",
+        action="store",
+        metavar="NAME",
+        default="",
+        dest="outgroup")
+    req_grp.add_option("", "--mafft",
+        help="Path to 'mafft' executable (default: $PATH)",
+        action="store",
+        metavar="PATH",
+        default="",
+        dest="mafft")
+    req_grp.add_option("", "--raxml",
+        help="Path to 'raxml' executable (default: $PATH)",
+        action="store",
+        metavar="PATH",
+        default="",
+        dest="raxml")
+    # ========  reference organelle options  ======== #
+    phy_grp.add_option("", "--ref-msa",
+        help="Precomputed multiple sequence alignments (MSA; in fasta format) of reference organelle genomes, to skip the MSA computaion step",
+        action="store",
+        metavar="FILE",
+        default="",
+        dest="ref_msa")
+    phy_grp.add_option("", "--ref-tree",
+        help="Precomputed phylogenetic tree (in Newick format) of reference organelle genomes, to skip the phylogenetic tree calculation step",
+        action="store",
+        metavar="FILE",
+        default="",
+        dest="ref_tree")
+    phy_grp.add_option("", "--alignment-net",
+        help="List of UCSC 'net' (genome pairwise alignment) files with the names of closely related species in the multi fasta organelle genome file, to verify estimated insertion ages (see also: --ignore-card)",
+        action="store",
+        metavar="FILE",
+        default=None,
+        dest="alignment_net")
+    phy_grp.add_option("", "--ignore-card",
+        help="Comma-separated chromosome names of target species to exclude the specific chromosomes from the alignment net calculation (see also: --alignment-net)",
+        action="store",
+        metavar="CHR1,CHR2,...",
+        default="chrM",
+        dest="ignore_card")
+    phy_grp.add_option("", "--genome-seqs",
+        help="List of nuclear genome files of all species in the multi fasta organelle genome file, to verify estimated insertion ages (see also: --last)",
+        action="store",
+        metavar="FILE",
+        default=None,
+        dest="genome_seqs")
+    phy_grp.add_option("", "--last",
+        help="Path to 'last' executables to run '--genome-seqs' option (default: $PATH) (see also: --genome-seqs)",
+        action="store",
+        metavar="PATH",
+        default="",
+        dest="last")
+    return op
+
+
+# check input arguments
+def checkArguments(opts, args):
+    if len(args) < 2:
+        raise Exception("I need at least 2 arguments: organelleGenome fastaFile(s)")
+    
+    # check required arguments
+    if opts.mafft: opts.mafft += "/"
+    if opts.raxml: opts.raxml += "/"
+    pathExists(opts.mafft + "mafft")
+    pathExists(opts.raxml + "raxmlHPC")
+    pathExists(args[0])
+    for arg in args[1:]: pathExists(arg)
+
+    # check organelle genomes
+    if not opts.outgroup:
+        raise Exception("input outgroup name in: " + args[0])
+    tmp = commands.getoutput("grep -i '>' " + args[0])
+    orgs = [n[1:] for n in tmp.split("\n")]
+    if opts.outgroup not in orgs:
+        raise Exception("--outgroup: can't find " + opts.outgroup
+                        + " in " + args[0])
+    if opts.alignment_net:
+        pathExists(opts.alignment_net)
+        for line in open(opts.alignment_net):
+            l = line.rstrip("\n").split()
+            if l[0] not in orgs:
+                raise Exception(l[0] + " is not in " + args[0])
+            pathExists(l[1])
+    if opts.genome_seqs:
+        if opts.last: opts.last += "/"
+        pathExists(opts.last + "lastdb")
+        pathExists(opts.last + "lastex")
+        pathExists(opts.last + "lastal")
+        pathExists(opts.genome_seqs)
+        for line in open(opts.genome_seqs):
+            l = line.rstrip("\n").split()
+            if l[0] not in orgs:
+                raise Exception(l[0] + " is not in " + args[0])
+            pathExists(l[1])
+
+    # check organelle msa and phylogenetic tree
+    if opts.ref_msa : pathExists(opts.ref_msa)
+    if opts.ref_tree: pathExists(opts.ref_tree)
+
+
+
+# main function
+def main(prog, opts, args, wd):
+    checkArguments(opts, args)
+
+    # compute reference phylogenetic tree
+    refmsa, reftree = orgTree(prog, opts, args[0], wd)
+
+    # load aligned reference sequences
+    refSeq = []
+    marks = string.maketrans(".~", "--")
+    for name, seq in readFasta(refmsa):
+        refSeq.append([name, seq.translate(marks)])
+
+    # load phylogenetic tree of reference sequences
+    refTree = readTree(reftree)
+
+    # estimate insertion ages and output results
+    marks = string.maketrans(" \t()[]:;,", "________|")
+    outgroup = opts.outgroup.translate(marks)
+    organelle = refSeq[0][0].translate(marks)
+    for file in args[1:]:
+        prefix = os.path.basename(file).split(".")[0]
+        fwd = wd + "/" + prefix
+        commands.getoutput("mkdir " + fwd)
+        trees = nucTree(prog, opts, file, refSeq, fwd)
+        coordDict, ageStr, ages = nucAges(prog, refTree, reftree,
+                       trees, organelle, outgroup, opts, wd)
+        writeCoord(coordDict, prefix + ".age", ageStr, ages)
+    if opts.verbose:
+        print prog + ": completed!"
+
+
+if __name__ == "__main__":
+    prog = os.path.basename(sys.argv[0])
+    op = buildOptionParser()
+    (opts, args) = op.parse_args()
+
+    # work directory
+    place = commands.getoutput("pwd")
+    wd = place + "/ageOut_" + strftime("%Y%m%d%H%M%S", gmtime())
+    commands.getoutput("mkdir " + wd)
+
+    try: main(prog, opts, args, wd)
+    except KeyboardInterrupt: pass
+    except Exception, e:
+        sys.exit(prog + ": error: " +str(e))
+    finally:
+        commands.getoutput("rm -r " + wd)  # clean up
