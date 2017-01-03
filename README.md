@@ -17,7 +17,7 @@ Requirement
 
 norg-suite requires the following environment to run:
 
-1) Python 2.5, or more latest
+1) Python 3.x
 
 2) Third party tools
 
